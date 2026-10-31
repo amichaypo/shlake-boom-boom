@@ -82,6 +82,7 @@ button.playagain:active{transform:scale(.96)}
 .slot.stuck .piece{opacity:.35;filter:grayscale(.7)}
 .piece.dragging-src{opacity:.25}
 .mini{position:relative;margin:1.5px}
+.drag-clone .mini{margin:2.5px}
 .drag-clone{position:fixed;left:0;top:0;z-index:60;display:grid;pointer-events:none;will-change:transform;filter:drop-shadow(0 14px 18px rgba(0,0,0,.5))}
 footer{font-size:11px;color:#6f77a8;text-align:center}
 </style>
@@ -133,6 +134,10 @@ const boardEl=document.getElementById('board'),trayEl=document.getElementById('t
 let drag=null, cellEls=[], cloneEl=null, ghostEls=[];
 function gem(color,extra=''){const d=document.createElement('div');d.className=`gem c${color} ${extra}`;return d}
 function boardCell(){return boardEl.getBoundingClientRect().width/SIZE}
+function gridGeom(){
+  const a=cellEls[0][0].getBoundingClientRect(),b=cellEls[0][1].getBoundingClientRect(),c=cellEls[1][0].getBoundingClientRect();
+  return{ox:a.left,oy:a.top,px:b.left-a.left,py:c.top-a.top};
+}
 function clearGhost(){for(const g of ghostEls)g.remove();ghostEls=[]}
 function updateGhost(){
   clearGhost();
@@ -186,7 +191,7 @@ function place(idx,row,col){
   const{rows,cols}=findClears(board);const lines=rows.length+cols.length;
   let gained=p.shape.length;
   if(lines>0){
-    combo++;gained+=(lines*10+Math.max(0,lines-1)*15)*combo;
+    combo++;gained+=(lines*25+Math.max(0,lines-1)*40)*combo;
     pop('+'+gained);sndClear(lines);
     const cells=[];for(const r of rows)for(let c=0;c<SIZE;c++)cells.push({r,c,color:board[r][c]});for(const c of cols)for(let r=0;r<SIZE;r++)if(!rows.includes(r))cells.push({r,c,color:board[r][c]});
     for(const r of rows)for(let c=0;c<SIZE;c++)board[r][c]=null;
@@ -200,15 +205,15 @@ function place(idx,row,col){
 }
 function computeHover(d){
   const p=tray[d.idx];if(!p)return null;
-  const rect=boardEl.getBoundingClientRect(),cell=rect.width/SIZE,{rows,cols}=dims(p.shape);
-  const tlX=d.x-cols*cell/2,tlY=d.y-d.lift-rows*cell;
-  const near=tlX<rect.right+cell&&tlX+cols*cell>rect.left-cell&&tlY<rect.bottom+cell&&tlY+rows*cell>rect.top-cell;
+  const g=d.geom,{rows,cols}=dims(p.shape);
+  const tlX=d.x-cols*g.px/2,tlY=d.y-d.lift-rows*g.py;
+  const near=tlX<g.ox+SIZE*g.px+g.px&&tlX+cols*g.px>g.ox-g.px&&tlY<g.oy+SIZE*g.py+g.py&&tlY+rows*g.py>g.oy-g.py;
   if(!near)return null;
-  const fr=(tlY-rect.top)/cell,fc=(tlX-rect.left)/cell;
+  const fr=(tlY-g.oy)/g.py,fc=(tlX-g.ox)/g.px;
   const row=Math.round(fr),col=Math.round(fc);
   if(fits(board,p.shape,row,col))return{row,col,valid:true};
-  // forgiving snap: use the nearest valid anchor next to the finger target
-  let bestA=null,bestD=1.6;
+  // gentle snap: only when the finger is clearly closer to a valid neighbor
+  let bestA=null,bestD=0.9;
   for(let dr=-1;dr<=1;dr++)for(let dc=-1;dc<=1;dc++){
     if(!dr&&!dc)continue;
     const rr=row+dr,cc=col+dc,dist=Math.hypot(rr-fr,cc-fc);
@@ -221,33 +226,46 @@ function removeClone(){if(cloneEl){cloneEl.remove();cloneEl=null}}
 function moveClone(){
   if(!drag){removeClone();return}
   const p=tray[drag.idx];if(!p)return;
-  const cell=boardCell(),{rows,cols}=dims(p.shape);
+  const g=drag.geom,{rows,cols}=dims(p.shape);
   if(!cloneEl){
     cloneEl=document.createElement('div');cloneEl.className='drag-clone';
-    cloneEl.style.gridTemplateRows=`repeat(${rows},${cell}px)`;
-    cloneEl.style.gridTemplateColumns=`repeat(${cols},${cell}px)`;
+    cloneEl.style.gridTemplateRows=`repeat(${rows},${g.py}px)`;
+    cloneEl.style.gridTemplateColumns=`repeat(${cols},${g.px}px)`;
     for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){const m=document.createElement('div');m.className='mini';if(p.shape.some(([dy,dx])=>dy===r&&dx===c))m.appendChild(gem(p.color));cloneEl.appendChild(m)}
     document.body.appendChild(cloneEl);
   }
-  cloneEl.style.transform=`translate(${drag.x-cols*cell/2}px,${drag.y-drag.lift-rows*cell}px)`;
+  cloneEl.style.transform=`translate(${drag.x-cols*g.px/2}px,${drag.y-drag.lift-rows*g.py}px)`;
 }
 function onPieceDown(e,idx){
   if(over||!tray[idx])return;
   e.preventDefault();
-  drag={idx,x:e.clientX,y:e.clientY,lift:Math.max(76,boardCell()*1.5),hover:null};
-  render();moveClone();
+  const g0=gridGeom();
+  drag={idx,x:e.clientX,y:e.clientY,lift:Math.max(76,g0.py*1.5),geom:g0,hover:null,raf:0};
+  const slotEl=e.currentTarget;
+  const srcEl=slotEl.querySelector('.piece');
+  if(srcEl)srcEl.classList.add('dragging-src');
+  moveClone();
   const move=ev=>{
     if(!drag)return;
     ev.preventDefault();
     drag.x=ev.clientX;drag.y=ev.clientY;
-    drag.hover=computeHover(drag);
-    moveClone();updateGhost();
+    if(drag.raf)return;
+    drag.raf=requestAnimationFrame(()=>{
+      if(!drag)return;
+      drag.raf=0;
+      const h=computeHover(drag);
+      const prev=drag.hover;
+      drag.hover=h;
+      moveClone();
+      if(!prev||!h||prev.row!==h.row||prev.col!==h.col||prev.valid!==h.valid)updateGhost();
+    });
   };
   const finish=(ev,cancelled)=>{
     window.removeEventListener('pointermove',move);
     window.removeEventListener('pointerup',up);
     window.removeEventListener('pointercancel',cancel);
     if(!drag)return;
+    if(drag.raf){cancelAnimationFrame(drag.raf);drag.raf=0}
     if(!cancelled){
       drag.x=ev.clientX;drag.y=ev.clientY;
       const h=computeHover(drag);const i=drag.idx;
